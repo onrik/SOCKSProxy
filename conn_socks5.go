@@ -88,11 +88,15 @@ func (c *socks5Conn) handshake() (err error) {
 }
 
 func (c *socks5Conn) authBasedPassword(methods []byte) (err error) {
-	if !bytes.Contains(methods, []byte{socks5AuthMethodPassword}) {
+	method := socks5AuthMethodPassword
+	if c.isTLS() {
+		method = socks5AuthMethodTLSPassword
+	}
+	if !bytes.Contains(methods, []byte{method}) {
 		c.sendAuthReply(socks5AuthMethodNoAcceptable)
 		return errAuthMethodNotSupported
 	}
-	c.sendAuthReply(socks5AuthMethodPassword)
+	c.sendAuthReply(method)
 
 	reader := bufio.NewReader(c.localConn)
 	version, err := reader.ReadByte()
@@ -179,4 +183,8 @@ func (c *socks5Conn) sendUDPReply(request *socks5Request) {
 	reply = append(reply, request.addr...)
 	reply = append(reply, request.port...)
 	c.localConn.Write(reply)
+}
+
+func (c *socks5Conn) isTLS() bool {
+	return c.conf.TLSConfig != nil
 }

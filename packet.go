@@ -7,6 +7,8 @@ import (
 	"strconv"
 )
 
+// region SOCKS4
+
 type socks4Request struct {
 	command byte
 	port    []byte
@@ -15,40 +17,10 @@ type socks4Request struct {
 	fqdn    []byte
 }
 
-func readSocks4Request(conn net.Conn) (request *socks4Request, err error) {
-	reader := bufio.NewReader(conn)
-	request = &socks4Request{}
-	request.command, err = reader.ReadByte()
-	if err != nil {
-		return
-	}
-	request.port, err = reader.ReadBytes(2)
-	if err != nil {
-		return
-	}
-	request.ip, err = reader.ReadBytes(4)
-	if err != nil {
-		return
-	}
-	request.userId, err = reader.ReadSlice(0)
-	if err != nil {
-		return
-	}
-	if !request.IsSOCKS4A() {
-		return
-	}
-	request.fqdn, err = reader.ReadSlice(0)
-	if err != nil {
-		return
-	}
-	return
-}
-
 func (request *socks4Request) IsSOCKS4A() bool {
 	ip := request.ip
 	return ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] != 0
 }
-
 func (request *socks4Request) Address() string {
 	var host, port string
 	if request.IsSOCKS4A() {
@@ -56,29 +28,111 @@ func (request *socks4Request) Address() string {
 	} else {
 		host = net.IP(request.ip).String()
 	}
-	port = strconv.Itoa(int(binary.BigEndian.Uint16(request.ip)))
+	port = strconv.Itoa(int(binary.BigEndian.Uint16(request.port)))
 	return net.JoinHostPort(host, port)
 }
-
 func (request *socks4Request) ToPacket() []byte {
-	packet := []byte{SOCKS4Version, request.command}
+	packet := []byte{socks4version, request.command}
 	packet = append(packet, request.port...)
 	packet = append(packet, request.ip...)
-
-	packet = append(append(packet, request.userId...), 0)
+	packet = append(packet, request.userId...)
+	packet = append(packet, 0)
 	if request.IsSOCKS4A() {
-		packet = append(append(packet, request.fqdn...), 0)
+		packet = append(packet, request.fqdn...)
+		packet = append(packet, 0)
 	}
-
 	return packet
 }
 
-type socks5Initial struct {
+type socks4Response struct {
+	status byte
+	port   []byte
+	ip     []byte
+}
+
+func (response *socks4Response) ToPacket() []byte {
+	packet := []byte{0x00, response.status}
+	packet = append(packet, response.port...)
+	packet = append(packet, response.ip...)
+	return packet
+}
+
+func readSocks4Request(conn net.Conn) (request *socks4Request, err error) {
+	reader := bufio.NewReader(conn)
+	request = &socks4Request{}
+	if request.command, err = reader.ReadByte(); err != nil {
+		return
+	}
+	request.port = make([]byte, 2)
+	if _, err = reader.Read(request.port); err != nil {
+		return
+	}
+	request.ip = make([]byte, 4)
+	if _, err = reader.Read(request.ip); err != nil {
+		return
+	}
+	if request.userId, err = reader.ReadBytes(0); err != nil {
+		return
+	}
+	if !request.IsSOCKS4A() {
+		return
+	}
+	if request.fqdn, err = reader.ReadBytes(0); err != nil {
+		return
+	}
+	return
+}
+
+// endregion
+
+// region SOCKS5
+
+type socks5Addr struct {
+	addrType byte
+	addr     []byte
+	port     []byte
+}
+
+func readSocks5Addr(reader *bufio.Reader) (addr *socks5Addr, err error) {
+	addr = &socks5Addr{}
+	if addr.addrType, err = reader.ReadByte(); err != nil {
+		return
+	}
+	switch addr.addrType {
+	case socks5AddressTypeIPv4, socks5AddressTypeIPv6:
+		length := net.IPv4len
+		if addr.addrType == socks5AddressTypeIPv6 {
+			length = net.IPv6len
+		}
+		addr.addr = make([]byte, length)
+		if _, err = reader.Read(addr.addr); err != nil {
+			return
+		}
+	case socks5AddressTypeFQDN:
+		length, err := reader.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		addr.addr = make([]byte, length)
+		if _, err = reader.Read(addr.addr); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, errAddressTypeNotSupported
+	}
+	addr.port = make([]byte, 2)
+	if _, err = reader.Read(addr.port); err != nil {
+		return
+	}
+	return
+}
+
+type socks5InitialRequest struct {
 	version byte
 	methods []byte
 }
 
-func (request *socks5Initial) ToPacket() []byte {
+func (request *socks5InitialRequest) ToPacket() []byte {
 	packet := []byte{
 		request.version,
 		byte(len(request.methods)),
@@ -87,12 +141,16 @@ func (request *socks5Initial) ToPacket() []byte {
 	return packet
 }
 
+type socks5InitialResponse []byte
+
+func (response socks5InitialResponse) Length() int   { return len(response) }
+func (response socks5InitialResponse) Version() byte { return response[0] }
+func (response socks5InitialResponse) Auth() byte    { return response[1] }
+
 type socks5Request struct {
-	version  byte
-	command  byte
-	addrType byte
-	addr     []byte
-	port     []byte
+	version byte
+	command byte
+	*socks5Addr
 }
 
 func (request *socks5Request) ToPacket() []byte {
@@ -122,47 +180,17 @@ func (request *socks5Request) Address() string {
 func readSocks5Request(conn net.Conn) (request *socks5Request, err error) {
 	reader := bufio.NewReader(conn)
 	request = &socks5Request{}
-	request.version, err = reader.ReadByte()
-	if err != nil {
+	if request.version, err = reader.ReadByte(); err != nil {
 		return
 	}
-	request.command, err = reader.ReadByte()
-	if err != nil {
+	if request.command, err = reader.ReadByte(); err != nil {
 		return
 	}
-	_, err = reader.ReadByte()
-	if err != nil {
+	if _, err = reader.ReadByte(); err != nil {
 		return
 	}
-	request.addrType, err = reader.ReadByte()
-	if err != nil {
-		return
-	}
-	switch request.addrType {
-	case socks5AddressTypeIPv4:
-		request.addr, err = reader.ReadBytes(net.IPv4len)
-		if err != nil {
-			return
-		}
-	case socks5AddressTypeIPv6:
-		request.addr, err = reader.ReadBytes(net.IPv6len)
-		if err != nil {
-			return
-		}
-	case socks5AddressTypeFQDN:
-		length, err := reader.ReadByte()
-		if err != nil {
-			return
-		}
-		request.addr, err = reader.ReadBytes(length)
-		if err != nil {
-			return
-		}
-	default:
-		conn.Write(buildSocks5Reply(request, socks5StatusAddressTypeNotSupported))
-		conn.Close()
-		return nil, errUnsupportedAddressType
-	}
-	request.port, err = reader.ReadBytes(2)
+	request.socks5Addr, err = readSocks5Addr(reader)
 	return
 }
+
+// endregion

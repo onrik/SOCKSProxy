@@ -2,42 +2,44 @@ package proxy
 
 import (
 	"io"
+	"net"
 )
 
 type socks4Conn struct {
-	*socksConn
+	localConn net.Conn
+	conf      *SOCKSConf
 }
 
-func (conn *socks4Conn) Serve() (err error) {
-	request, err := readSocks4Request(conn.localConn)
+func (c *socks4Conn) Serve() (err error) {
+	request, err := readSocks4Request(c.localConn)
 	if err != nil {
-		conn.sendReply(request, socks4StatusRejected)
+		c.sendReply(request, socks4StatusRejected)
 		return err
 	}
 	switch request.command {
 	case commandConnect:
-		err = conn.handleConnect(request)
+		c.sendReply(request, socks4StatusGranted)
+		err = c.handleConnect(request.Address())
 	default:
 		err = errCommandNotSupported
 	}
 	if err != nil {
-		conn.sendReply(request, socks4StatusRejected)
+		c.sendReply(request, socks4StatusRejected)
 	}
 	return
 }
 
-func (conn *socks4Conn) handleConnect(request *socks4Request) (err error) {
-	conn.sendReply(request, socks4StatusGranted)
-	remoteConn, err := conn.Dial("tcp", request.Address())
+func (c *socks4Conn) handleConnect(host string) (err error) {
+	remoteConn, err := c.conf.Dial("tcp", host)
 	if err != nil {
 		return err
 	}
-	go io.Copy(conn.localConn, remoteConn)
-	go io.Copy(remoteConn, conn.localConn)
+	go io.Copy(c.localConn, remoteConn)
+	go io.Copy(remoteConn, c.localConn)
 	return
 }
 
-func (conn *socks4Conn) sendReply(request *socks4Request, status byte) {
+func (c *socks4Conn) sendReply(request *socks4Request, status byte) {
 	response := &socks4Response{
 		status:status,
 		port:  make([]byte, 2),
@@ -47,8 +49,5 @@ func (conn *socks4Conn) sendReply(request *socks4Request, status byte) {
 		response.port = request.port
 		response.ip = request.ip
 	}
-	conn.localConn.Write(response.ToPacket())
-	if status != socks4StatusGranted {
-		conn.localConn.Close()
-	}
+	c.localConn.Write(response.ToPacket())
 }
